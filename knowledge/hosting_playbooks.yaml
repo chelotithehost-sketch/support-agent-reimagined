@@ -1,0 +1,259 @@
+# knowledge/hosting_playbooks.yaml
+# ───────────────────────────────────────────────
+# Domain-specific troubleshooting playbooks for African web hosting.
+# The Reasoner loads these to build resolution paths.
+# Copy into: knowledge/hosting_playbooks.yaml
+
+playbooks:
+
+  # ── Email ──────────────────────────────────────
+
+  email_not_sending:
+    product_area: EMAIL
+    triggers:
+      - "can't send email"
+      - "email not sending"
+      - "outgoing mail failing"
+      - "SMTP error"
+      - "bounceback"
+    diagnostic_steps:
+      - step: "Check MX records via dig or DNS lookup"
+        tool: "dig MX {domain}"
+        expected: "Should match provider MX (e.g., mx1.hostprovider.co.ke)"
+      - step: "Check SPF record"
+        tool: "dig TXT {domain}"
+        expected: "Should include 'include:_spf.hostprovider.co.ke'"
+      - step: "Check DKIM record"
+        tool: "dig TXT default._domainkey.{domain}"
+        expected: "Should return a valid DKIM public key"
+      - step: "Verify SMTP port access"
+        tool: "telnet smtp.hostprovider.co.ke 587"
+        expected: "Should connect and show STARTTLS"
+      - step: "Check mail queue in cPanel"
+        path: "cPanel → Email → Track Delivery"
+        expected: "No deferred messages older than 1 hour"
+    common_causes:
+      - cause: "MX records pointing to old provider after migration"
+        fix: "Update nameservers or MX records to hostprovider values"
+        propagation_time: "Up to 48 hours"
+      - cause: "Missing SPF record"
+        fix: "Add TXT record: v=spf1 include:_spf.hostprovider.co.ke ~all"
+        propagation_time: "30 minutes"
+      - cause: "SMTP port blocked by ISP (common in Kenya/Tanzania)"
+        fix: "Try port 465 (SSL) or 587 (TLS). Some ISPs block 25."
+        note: "Safaricom and Airtel occasionally block port 25"
+      - cause: "Mail quota exceeded"
+        fix: "Check cPanel → Email Accounts → disk usage. Upgrade or clean up."
+    escalation_criteria:
+      - "Mail server IP is blacklisted (check MXToolbox)"
+      - "Customer's domain has expired"
+      - "Issue persists after 48h with correct DNS"
+
+  email_not_receiving:
+    product_area: EMAIL
+    triggers:
+      - "not getting emails"
+      - "inbox empty"
+      - "emails bouncing to sender"
+      - "can't receive email"
+    diagnostic_steps:
+      - step: "Check MX records"
+        tool: "dig MX {domain}"
+        expected: "Must point to hostprovider mail servers"
+      - step: "Check email routing in cPanel"
+        path: "cPanel → Email → Email Routing"
+        expected: "Should be 'Local Mail Exchanger'"
+      - step: "Check spam folder"
+        path: "cPanel → Email → Spam Filters"
+        expected: "No overly aggressive rules"
+      - step: "Check email forwarders"
+        path: "cPanel → Email → Forwarders"
+        expected: "No conflicting forwarders"
+    common_causes:
+      - cause: "MX records not propagated yet"
+        fix: "Wait up to 48h. Use intodns.com to verify."
+      - cause: "Email routing set to Remote"
+        fix: "Change to Local Mail Exchanger in cPanel"
+      - cause: "Disk quota full"
+        fix: "Delete old emails or upgrade plan"
+
+  # ── SSL ────────────────────────────────────────
+
+  ssl_not_working:
+    product_area: SSL
+    triggers:
+      - "SSL error"
+      - "HTTPS not working"
+      - "certificate error"
+      - "site not secure"
+      - "NET::ERR_CERT"
+    diagnostic_steps:
+      - step: "Check certificate status"
+        tool: "echo | openssl s_client -servername {domain} -connect {domain}:443 2>/dev/null | openssl x509 -noout -dates"
+        expected: "notAfter should be in the future"
+      - step: "Check certificate matches domain"
+        tool: "echo | openssl s_client -servername {domain} -connect {domain}:443 2>/dev/null | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'"
+        expected: "Should include {domain} and www.{domain}"
+      - step: "Check mixed content"
+        path: "Browser console → Security tab"
+        expected: "No mixed content warnings"
+    common_causes:
+      - cause: "Certificate expired"
+        fix: "Renew via cPanel → SSL/TLS → AutoSSL or Let's Encrypt"
+      - cause: "Certificate doesn't cover www subdomain"
+        fix: "Reissue with both domain.co.ke and www.domain.co.ke"
+      - cause: "DNS not pointing to correct server"
+        fix: "Verify A record points to hosting server IP"
+      - cause: "Mixed content (HTTP resources on HTTPS page)"
+        fix: "Update all internal links to use https:// or //"
+    escalation_criteria:
+      - "EV certificate required (e-commerce)"
+      - "Wildcard certificate needed"
+
+  # ── DNS ────────────────────────────────────────
+
+  dns_not_resolving:
+    product_area: DNS
+    triggers:
+      - "domain not loading"
+      - "DNS error"
+      - "site not found"
+      - "nameserver"
+      - "NXDOMAIN"
+    diagnostic_steps:
+      - step: "Check nameservers"
+        tool: "dig NS {domain}"
+        expected: "Should match hostprovider nameservers"
+      - step: "Check A record"
+        tool: "dig A {domain}"
+        expected: "Should return hosting server IP"
+      - step: "Check propagation globally"
+        tool: "https://www.whatsmydns.net/#{domain}/A"
+        expected: "Consistent across all locations"
+    common_causes:
+      - cause: "Nameservers not updated at registrar"
+        fix: "Update NS records at domain registrar to hostprovider values"
+        propagation_time: "24-48 hours"
+      - cause: "Domain expired at registrar"
+        fix: "Renew domain at registrar (not hosting provider)"
+      - cause: "DNS zone missing A record"
+        fix: "Add A record in cPanel → Zone Editor"
+    note: "For .co.ke, .go.ke domains: KENIC propagation can take up to 72h"
+
+  # ── Website Down ──────────────────────────────
+
+  site_down:
+    product_area: CPANEL
+    triggers:
+      - "website down"
+      - "site not loading"
+      - "500 error"
+      - "503 error"
+      - "white screen"
+      - "internal server error"
+    diagnostic_steps:
+      - step: "Check server status"
+        path: "cPanel → Server Information"
+        expected: "Server status: Running"
+      - step: "Check error logs"
+        path: "cPanel → Errors → Error Log"
+        expected: "Look for recent PHP/Apache errors"
+      - step: "Check resource usage"
+        path: "cPanel → Resource Usage"
+        expected: "CPU and memory within limits"
+      - step: "Check .htaccess for syntax errors"
+        tool: "Rename .htaccess to .htaccess.bak and test"
+        expected: "If site loads, .htaccess has errors"
+    common_causes:
+      - cause: "PHP memory limit exceeded"
+        fix: "Add to .htaccess: php_value memory_limit 256M"
+      - cause: "Corrupt .htaccess"
+        fix: "Rename and regenerate via WordPress Settings → Permalinks → Save"
+      - cause: "Plugin/theme conflict (WordPress)"
+        fix: "Rename wp-content/plugins folder to disable all plugins"
+      - cause: "Disk space full"
+        fix: "Check cPanel → Disk Usage. Clear logs or upgrade."
+      - cause: "ModSecurity blocking legitimate requests"
+        fix: "Disable specific rule in cPanel → ModSecurity"
+    escalation_criteria:
+      - "Server-level issue (multiple customers affected)"
+      - "Database corruption suspected"
+      - "DDoS attack indicators"
+
+  # ── Billing ───────────────────────────────────
+
+  billing_double_charge:
+    product_area: WHMCS
+    triggers:
+      - "charged twice"
+      - "double payment"
+      - "duplicate charge"
+      - "paid twice"
+    diagnostic_steps:
+      - step: "Check WHMCS invoice history"
+        path: "WHMCS Admin → Billing → Invoices → Search by customer"
+        expected: "Look for duplicate invoices for same service/period"
+      - step: "Check payment gateway logs"
+        path: "WHMCS → Billing → Transactions List"
+        expected: "Verify if payment was captured twice"
+      - step: "Check M-Pesa callback logs (if M-Pesa payment)"
+        path: "WHMCS → Modules → M-Pesa → Transaction Log"
+        expected: "M-Pesa sometimes sends duplicate callbacks"
+    resolution:
+      - "Initiate refund for duplicate charge via payment gateway"
+      - "Send confirmation email with refund reference"
+      - "If M-Pesa: refund via M-Pesa portal, takes 24-48h"
+    empathy_statements:
+      - "I completely understand your frustration — being charged twice is unacceptable, and I'm going to fix this right now."
+      - "I can see the duplicate charge in our system. I'm processing your refund immediately."
+    escalation_criteria:
+      - "Refund not processed within 48 hours"
+      - "Customer threatens legal action"
+      - "Third duplicate charge for same customer"
+
+  # ── cPanel ─────────────────────────────────────
+
+  cpanel_login_failed:
+    product_area: CPANEL
+    triggers:
+      - "can't login to cPanel"
+      - "cPanel password not working"
+      - "cPanel locked out"
+      - "cPanel access denied"
+    diagnostic_steps:
+      - step: "Verify cPanel URL"
+        expected: "https://domain.co.ke:2083 or https://server-ip:2083"
+      - step: "Check if IP is blocked"
+        path: "WHMCS → Support → Open Ticket → Ask for customer IP"
+        expected: "Check cPanel → Security → IP Blocker"
+      - step: "Check failed login attempts"
+        path: "WHMCS → cPanel → Failed Login Attempts"
+        expected: "If >5 failures in 1 hour, IP auto-blocked"
+    resolution:
+      - "Reset password via WHMCS → Products → Change Password"
+      - "If IP blocked: unblock via cPanel → IP Blocker"
+      - "Advise customer to use password manager"
+
+  # ── WordPress ─────────────────────────────────
+
+  wordpress_white_screen:
+    product_area: WORDPRESS
+    triggers:
+      - "white screen"
+      - "WordPress blank page"
+      - "wp-admin white screen"
+      - "WordPress not loading"
+    diagnostic_steps:
+      - step: "Enable debug mode"
+        tool: "Add to wp-config.php: define('WP_DEBUG', true); define('WP_DEBUG_LOG', true);"
+        expected: "Check wp-content/debug.log for errors"
+      - step: "Check PHP version compatibility"
+        path: "cPanel → Select PHP Version"
+        expected: "WordPress 6.x needs PHP 7.4+"
+      - step: "Disable all plugins"
+        tool: "Rename wp-content/plugins to plugins.disabled"
+        expected: "If site loads, plugin conflict"
+    resolution:
+      - "Most common: plugin conflict. Re-enable one by one to find culprit."
+      - "Second most common: memory limit. Add php_value memory_limit 256M to .htaccess"
+      - "Third: corrupt WordPress core. Reinstall via cPanel → Softaculous"
