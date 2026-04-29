@@ -149,7 +149,7 @@ class WHMCSClient:
             ],
             "unpaid_invoices": [
                 inv for inv in invoices.get("invoices", {}).get("invoice", [])
-                if inv.get("status") === "Unpaid"
+                if inv.get("status") == "Unpaid"
             ],
         }
 

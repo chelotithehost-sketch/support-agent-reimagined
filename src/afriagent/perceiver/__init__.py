@@ -31,49 +31,17 @@ from afriagent.models import (
 from afriagent.memory import MemoryManager
 from afriagent.brain.llm import BaseLLMProvider
 from afriagent.observability import REQUEST_COUNT, get_tracer
+from afriagent.perceiver.language import detect_language as _detect_language_advanced
 
 log = get_logger(__name__)
 tracer = get_tracer(__name__)
 
 # ── Language Detection ────────────────────────────────────────────
-
-LANGUAGE_MAP = {
-    "sw": "sw",  # Swahili
-    "en": "en",
-    "fr": "fr",
-    "pt": "pt",
-    "ha": "ha",  # Hausa
-    "yo": "yo",  # Yoruba
-    "ig": "ig",  # Igbo
-    "am": "am",  # Amharic
-    "zu": "zu",  # Zulu
-    "xh": "xh",  # Xhosa
-}
-
-# Simple language detection based on common patterns
-# In production, use a proper detection library or LLM
-SWAHILI_MARKERS = [
-    "habari", "nzuri", "sawa", "asante", "tafadhali", "karibu",
-    "namba", "akaunti", "malipo", "tatizo", "huduma", "pesa",
-]
-FRENCH_MARKERS = [
-    "bonjour", "merci", "s'il vous plaît", "compte", "paiement",
-    "problème", "service", "aide",
-]
-
+# Now uses the dedicated language.py module with Sheng support.
 
 def detect_language(text: str) -> str:
-    """Simple heuristic language detection. Replace with fasttext/langdetect in prod."""
-    lower = text.lower()
-
-    swahili_score = sum(1 for m in SWAHILI_MARKERS if m in lower)
-    french_score = sum(1 for m in FRENCH_MARKERS if m in lower)
-
-    if swahili_score > french_score and swahili_score > 0:
-        return "sw"
-    if french_score > 0:
-        return "fr"
-    return "en"
+    """Detect language using the advanced detector with Sheng awareness."""
+    return _detect_language_advanced(text)
 
 
 # ── Intent Classification ────────────────────────────────────────

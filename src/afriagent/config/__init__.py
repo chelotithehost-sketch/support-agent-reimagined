@@ -61,6 +61,7 @@ class Settings(BaseSettings):
 
     # ── LLM ──────────────────────────────────────────────────────
     llm_provider: LLMProvider = LLMProvider.OPENAI
+    llm_providers: list[str] = ["ollama", "openai", "anthropic"]
     openai_api_key: str = ""
     openai_model: str = "gpt-4o"
     openai_embedding_model: str = "text-embedding-3-small"
@@ -109,9 +110,24 @@ class Settings(BaseSettings):
     min_confidence_for_learning: float = 0.8
     few_shot_examples_limit: int = 5
 
+    # ── Coordinator ──────────────────────────────────────────────
+    coordinator_enabled: bool = True
+    coordinator_model_path: str = ""
+    coordinator_model_name: str = "coordinator"
+
+    # ── Self-Model (SQLite) ──────────────────────────────────────
+    self_model_db_path: str = "afriagent_self.db"
+
     @field_validator("cors_origins", mode="before")
     @classmethod
     def parse_cors(cls, v: Any) -> list[str]:
+        if isinstance(v, str):
+            return [s.strip() for s in v.split(",")]
+        return v  # type: ignore[return-value]
+
+    @field_validator("llm_providers", mode="before")
+    @classmethod
+    def parse_providers(cls, v: Any) -> list[str]:
         if isinstance(v, str):
             return [s.strip() for s in v.split(",")]
         return v  # type: ignore[return-value]

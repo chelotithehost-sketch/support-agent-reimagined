@@ -1,4 +1,8 @@
-"""Self-Improvement Engine — Few-shot learning from validated interactions."""
+"""Self-Improvement Engine — Few-shot learning from validated interactions.
+
+Extended to also log coordinator dispatch decisions for self-improvement
+and prepare data for future fine-tuning.
+"""
 
 from __future__ import annotations
 
@@ -6,7 +10,12 @@ from typing import Any
 
 from afriagent.config import settings
 from afriagent.config.logging import get_logger
-from afriagent.models import AgentResponse, ConversationContext, LearningExample
+from afriagent.models import (
+    AgentResponse,
+    ConversationContext,
+    DispatchPlan,
+    LearningExample,
+)
 from afriagent.memory import MemoryManager
 
 log = get_logger(__name__)
@@ -20,6 +29,10 @@ class LearningEngine:
     2. Store positive examples in Postgres (episodic memory)
     3. Embed and store in Qdrant (semantic memory) for retrieval
     4. Retrieve similar examples as few-shot prompts for future responses
+
+    Extended:
+    5. Log coordinator dispatch plans + outcomes to coordinator_decisions table
+    6. Provide data export for fine-tuning prep
     """
 
     def __init__(self, memory: MemoryManager) -> None:
@@ -68,8 +81,6 @@ class LearningEngine:
 
             # Store in Qdrant for semantic retrieval
             try:
-                # Use the LLM embedder (accessed via the brain's LLM)
-                # For now, store the pattern metadata
                 await self.memory.semantic.store_pattern(
                     pattern_id=example.id,
                     vector=[],  # Will be populated by the Brain's persist step
@@ -94,6 +105,62 @@ class LearningEngine:
 
         except Exception as e:
             log.error("Failed to capture learning example", error=str(e))
+            return False
+
+    async def log_coordinator_decision(
+        self,
+        plan: DispatchPlan,
+        outcome_confidence: float,
+        replan_count: int,
+        escalated: bool,
+        conversation_id: str = "",
+    ) -> bool:
+        """Log a coordinator dispatch decision for analysis and self-improvement.
+
+        This data is used by:
+        - The weekly clustering job to find low-confidence patterns
+        - The finetune_prep script to export training data
+        - The self-model to track coordinator accuracy
+        """
+        try:
+            import json
+            from datetime import datetime, timezone
+
+            record = {
+                "conversation_id": conversation_id,
+                "intent": plan.intent,
+                "plan_json": json.dumps(plan.model_dump(), default=str),
+                "outcome_confidence": outcome_confidence,
+                "replan_count": replan_count,
+                "escalated": escalated,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+            }
+
+            # Store in Postgres via episodic memory
+            # Uses a dedicated table or the existing learning_examples table
+            # with a different type marker
+            await self.memory.episodic.save_learning_example({
+                "id": f"coord-{conversation_id}-{datetime.now(timezone.utc).timestamp()}",
+                "conversation_id": conversation_id,
+                "customer_message": f"[COORDINATOR_DECISION] intent={plan.intent}",
+                "agent_response": json.dumps(plan.model_dump(), default=str),
+                "intent": plan.intent,
+                "sentiment": "neutral",
+                "confidence": outcome_confidence,
+                "satisfaction_score": None,
+            })
+
+            log.info(
+                "Coordinator decision logged",
+                intent=plan.intent,
+                confidence=outcome_confidence,
+                replans=replan_count,
+                escalated=escalated,
+            )
+            return True
+
+        except Exception as e:
+            log.error("Failed to log coordinator decision", error=str(e))
             return False
 
     async def get_few_shot_examples(
@@ -122,7 +189,6 @@ class LearningEngine:
 
     async def get_stats(self) -> dict[str, Any]:
         """Get learning statistics."""
-        # This would query the learning_examples table for stats
         return {
             "enabled": settings.learning_enabled,
             "min_confidence": settings.min_confidence_for_learning,

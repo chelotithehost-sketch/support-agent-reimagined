@@ -291,3 +291,50 @@ def create_llm_provider() -> BaseLLMProvider:
             return OllamaProvider()
         case _:
             raise ValueError(f"Unknown provider: {settings.llm_provider}")
+
+
+def get_provider_health() -> dict[str, dict[str, Any]]:
+    """Get health status of all configured providers for the self-model.
+
+    Returns dict of provider_name → {status, error_streak, avg_latency_ms}.
+    This is called by the coordinator to factor provider health into dispatch.
+    """
+    health: dict[str, dict[str, Any]] = {}
+
+    # Check each provider's circuit breaker state
+    for provider_name in settings.llm_providers:
+        try:
+            match provider_name:
+                case "openai":
+                    if settings.openai_api_key:
+                        provider = OpenAIProvider()
+                        state = provider.circuit.state
+                        health["openai"] = {
+                            "status": "circuit_open" if state == CircuitState.OPEN else
+                                      "degraded" if state == CircuitState.HALF_OPEN else "healthy",
+                            "error_streak": provider.circuit.fail_count,
+                            "avg_latency_ms": 0.0,  # Will be populated by self-model
+                        }
+                case "anthropic":
+                    if settings.anthropic_api_key:
+                        provider = AnthropicProvider()
+                        state = provider.circuit.state
+                        health["anthropic"] = {
+                            "status": "circuit_open" if state == CircuitState.OPEN else
+                                      "degraded" if state == CircuitState.HALF_OPEN else "healthy",
+                            "error_streak": provider.circuit.fail_count,
+                            "avg_latency_ms": 0.0,
+                        }
+                case "ollama":
+                    provider = OllamaProvider()
+                    state = provider.circuit.state
+                    health["ollama"] = {
+                        "status": "circuit_open" if state == CircuitState.OPEN else
+                                  "degraded" if state == CircuitState.HALF_OPEN else "healthy",
+                        "error_streak": provider.circuit.fail_count,
+                        "avg_latency_ms": 0.0,
+                    }
+        except Exception as e:
+            log.debug("Could not check provider health", provider=provider_name, error=str(e))
+
+    return health

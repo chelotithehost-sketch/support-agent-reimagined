@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -202,3 +203,51 @@ class LearningExample(BaseModel):
     confidence: float
     satisfaction_score: float | None = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+
+
+# ── Coordinator Dispatch ──────────────────────────────────────────
+
+
+class DispatchStep(BaseModel):
+    """A single step in a dispatch plan — either a tool call or an LLM call."""
+
+    tool: str | None = None          # tool name, or None for LLM call
+    llm_provider: str | None = None  # provider name, or None for tool call
+    params: dict[str, Any] = Field(default_factory=dict)
+
+
+class DispatchPlan(BaseModel):
+    """The coordinator's dispatch plan for handling a customer message."""
+
+    intent: str = "unclear"          # billing | outage | general | hostile | unclear
+    urgency: int = 2                 # 1–5
+    language: str = "en"             # en | sw | sheng | other
+    steps: list[DispatchStep] = Field(default_factory=list)
+    confidence: float = 0.5          # 0.0–1.0
+    reasoning: str = ""              # brief internal reasoning
+    escalate: bool = False           # whether to escalate to human
+
+
+# ── Coordinator Dispatch ──────────────────────────────────────────
+
+
+@dataclass
+class DispatchStep:
+    """A single step in a dispatch plan — either a tool call or an LLM call."""
+
+    tool: str | None            # tool name or None for LLM call
+    llm_provider: str | None    # provider name or None for tool call
+    params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class DispatchPlan:
+    """The coordinator's dispatch plan for handling a customer message."""
+
+    intent: str                 # billing | outage | general | hostile | unclear
+    urgency: int                # 1–5
+    language: str               # en | sw | sheng | other
+    steps: list[DispatchStep]   # ordered list of tool calls or LLM calls
+    confidence: float           # 0.0–1.0
+    reasoning: str              # brief internal reasoning
+    escalate: bool = False      # if True, skip to human escalation

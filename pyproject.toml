@@ -36,6 +36,9 @@ dependencies = [
     "openai>=1.12",
     "anthropic>=0.25",
     
+    # Language detection
+    "langdetect>=1.0.9",
+    
     # Observability
     "opentelemetry-api>=1.23",
     "opentelemetry-sdk>=1.23",
