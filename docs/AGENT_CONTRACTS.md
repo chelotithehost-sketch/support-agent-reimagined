@@ -1,172 +1,194 @@
-# docs/AGENT_CONTRACTS.md
-# ───────────────────────────────────────────────
-# Formal contracts for each agent in the pipeline.
-# Copy into: docs/AGENT_CONTRACTS.md
-
 # Agent Contracts
 
-Each agent in the pipeline has a strict contract: defined inputs, outputs, responsibilities, and failure modes. If an agent violates its contract, the pipeline must detect it and handle the failure.
+Every component in the pipeline has a strict contract: defined inputs, outputs, latency budgets, and failure modes. If a component violates its contract, the pipeline detects it and handles the failure.
 
 ---
 
-## 1. Perceiver (`agents/core/perceiver.py`)
+## 1. Perceiver (`perceiver/__init__.py` → `Perceiver.process()`)
 
-**Responsibility:** Extract structured signals from raw customer messages.
+**Responsibility:** Enrich raw inbound messages with language, intent, sentiment, urgency, customer context, and conversation history.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| **Input** | `str` (raw message) + `WorkingMemory` | Customer's message and conversation history |
-| **Output** | `Perception` | Intent, product area, urgency, emotional state, entities |
-| **Latency budget** | < 50ms | Rule-based, no LLM call |
-| **Failure mode** | Returns `Intent.UNKNOWN` with `confidence=0.0` | Downstream Reasoner handles via clarification |
+| **Input** | `InboundMessage` | Raw message from channel adapter (channel, sender_id, content, metadata) |
+| **Output** | `ConversationContext` | Enriched context with customer profile, history, NLU signals, similar patterns |
+| **Latency budget** | < 50ms (classification) + vector search time | Rule-based classification is instant; vector search adds ~20ms |
+| **Failure mode** | Raises `ValueError("Duplicate message")` for dedup; returns `Intent.GENERAL` with `confidence=0.0` on classification failure | Brain handles via coordinator fallback |
+
+**Processing steps:**
+1. Dedup check (Redis lock, TTL 10s)
+2. Language detection (`language.py` — Sheng-aware, marker-based + langdetect fallback)
+3. Translate to English if non-English (LLM call)
+4. Intent classification (keyword matching)
+5. Sentiment detection (marker counting)
+6. Urgency detection (keyword + sentiment correlation)
+7. Load customer profile (Redis cache → WHMCS API)
+8. Load conversation history (Redis → Postgres)
+9. Vector search for similar patterns (Qdrant)
+10. Persist message to Postgres
+11. Update session state in Redis
 
 **Invariants:**
-- `confidence` must be in `[0.0, 1.0]`
-- `emotional_intensity` must be in `[0.0, 1.0]`
-- If `contains_threat=True`, then `emotional_state` must be `ANGRY` or `FRUSTRATED`
-- If `is_escalation_request=True`, urgency must be at least `HIGH`
+- `detected_language` is one of: `"en"`, `"sw"`, `"sheng"`, `"fr"`, `"ha"`, `"yo"`, `"other"`
+- `detected_intent` is one of: `BILLING`, `TECHNICAL`, `SALES`, `GENERAL`, `ESCALATION`, `GREETING`, `COMPLAINT`
+- If content contains escalation keywords (`"speak to human"`, `"manager"`, etc.), `detected_urgency` must be at least `HIGH`
+- Duplicate messages within 10s window are rejected (Redis lock)
 
 **Fast-path rules (no LLM):**
-- Billing keywords → `Intent.BILLING_QUERY`
-- Human/supervisor request → `is_escalation_request=True`
-- Legal language → `contains_legal_language=True`
-- Threat language → `contains_threat=True`
+- `"invoice"`, `"payment"`, `"mpesa"` → `Intent.BILLING`
+- `"down"`, `"error"`, `"not working"` → `Intent.TECHNICAL`
+- `"manager"`, `"supervisor"`, `"human"` → `Intent.ESCALATION`
+- `"hello"`, `"habari"`, `"jambo"` → `Intent.GREETING`
 
 ---
 
-## 2. Router (`agents/core/router.py`)
+## 2. Coordinator (`coordinator/__init__.py` → `CoordinatorBrain.dispatch()`)
 
-**Responsibility:** Select the cheapest capable LLM for the task.
-
-| Field | Type | Description |
-|-------|------|-------------|
-| **Input** | `RoutingTask` | Required capabilities, urgency, emotional state, estimated tokens |
-| **Output** | `ModelSelection` | Provider, model, score, reason, estimated cost/latency |
-| **Latency budget** | < 10ms | Pure scoring, no network calls |
-| **Failure mode** | Falls back to local Ollama model | Always returns a selection |
-
-**Scoring formula:**
-```
-score = (capability_match × 0.40)
-      + (cost_efficiency × 0.25)
-      + (latency_score × 0.15)
-      + (historical_csat × 0.20)
-```
-
-**Invariants:**
-- If all cloud providers are circuit-broken, MUST return local Ollama
-- `estimated_cost_usd` must be non-negative
-- For `Urgency.CRITICAL`: skip cost optimization, prioritize latency
-- For `EmotionalState.ANGRY` + `contains_legal_language`: prefer models with higher CSAT
-
----
-
-## 3. Reasoner (`agents/core/reasoner.py`)
-
-**Responsibility:** Construct the complete context package for response generation.
+**Responsibility:** Analyze the enriched context and produce a `DispatchPlan` — an ordered list of tool calls and LLM calls.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| **Input** | `Perception` + `WorkingMemory` + `CustomerContext` + `SemanticResults` | All available context |
-| **Output** | `ReasoningPackage` | Resolution path, tone, format, constraints, KB chunks |
-| **Latency budget** | < 20ms | Assembly only, no LLM call |
-| **Failure mode** | Returns `needs_clarification=True` with a question | Never returns empty package |
+| **Input** | `ConversationContext` | Enriched context from Perceiver |
+| **Output** | `DispatchPlan` | intent, urgency, language, steps[], confidence, reasoning, escalate |
+| **Latency budget** | < 100ms (local LLM) or < 10ms (fallback) | llama-cpp-python for intelligent dispatch; keyword fallback when unavailable |
+| **Failure mode** | Falls back to keyword-based `_build_fallback_plan()` | Always returns a valid plan |
 
-**Decision logic:**
+**Dispatch decision flow:**
 ```
-if confidence < 0.60 AND clarifications_asked < max_clarifications:
-    → needs_clarification = True
-elif confidence < 0.60 AND clarifications_asked >= max_clarifications:
-    → needs_clarification = False (attempt resolution anyway)
+if coordinator_enabled AND llama-cpp-python available:
+    → generate DispatchPlan via local LLM (JSON output)
+    → parse and validate JSON
+    → if parse fails → fallback
 else:
-    → build resolution path
+    → keyword-based intent detection
+    → provider priority selection
+    → build simple plan
 ```
 
 **Invariants:**
-- `tone_instruction` must be non-empty
-- `must_avoid` must include at least `["I cannot help you"]`
-- If `perception.contains_threat=True`: `must_include` must contain `"empathy statement"`
-- If `perception.is_escalation_request=True`: `escalation_recommended=True`
-- `clarification_question` must end with `?` when set
+- `steps` must be non-empty (at minimum one LLM response step)
+- `confidence` must be in `[0.0, 1.0]`
+- `intent` must be one of: `"billing"`, `"outage"`, `"general"`, `"hostile"`, `"unclear"`
+- `urgency` must be in `[1, 5]`
+- Max 4 steps per plan
+- If `intent == "hostile"`, first step must be `create_support_ticket`
+- If `confidence < 0.5`, must include a clarification LLM step
+
+**Tool routing rules:**
+- M-Pesa queries → `check_invoice` before `mpesa_push`
+- DNS/hosting issues → `check_domain_dns` as first step
+- Billing queries → `check_invoice` + `check_invoice_status`
+- Hostile customers → `create_support_ticket` (High priority) + de-escalation LLM step
 
 ---
 
-## 4. Drafter (`agents/core/drafter.py`)
+## 3. Brain (`brain/__init__.py` → `Brain.generate_response()`)
 
-**Responsibility:** Generate a candidate response using the selected LLM.
+**Responsibility:** Execute the coordinator's dispatch plan, validate the result, and produce the final `AgentResponse`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| **Input** | customer message + `ReasoningPackage` + `Perception` + `ModelSelection` | Everything needed to write a response |
-| **Output** | `DraftResult` | Response text, confidence, metadata, cost |
-| **Latency budget** | 1-30s (LLM-dependent) | This is the expensive step |
-| **Failure mode** | Raises `LLMTimeoutError` or returns low-confidence draft | Pipeline retries with fallback model |
+| **Input** | `ConversationContext` | Enriched context from Perceiver |
+| **Output** | `AgentResponse` | Validated response content, confidence, validation result, escalation status |
+| **Latency budget** | 1-30s (LLM-dependent) | Dominated by LLM call latency |
+| **Failure mode** | Retries with replanning (max 3 cycles); escalates if all retries fail | Never returns an unvalidated response |
+
+**Execution loop:**
+```
+plan = coordinator.dispatch(context)
+for step in plan.steps:
+    result = execute_step(step, context)
+    if should_replan(result, replan_count):
+        plan = coordinator.replan(context, result, replan_count)
+        replan_count += 1
+        continue  # re-execute with new plan
+    if should_escalate(result, replan_count):
+        break  # escalate to human
+candidate = build_response_candidate(result)
+validation = validator.validate(candidate, context)
+if not validation.passed:
+    candidate = regenerate_with_feedback(context, validation.issues)
+    validation = validator.validate(candidate, context)
+```
+
+**Step execution:**
+- Tool steps → route to appropriate tool client (WHMCS, M-Pesa, DNS)
+- LLM steps → build messages with system prompt + intent context + conversation history → call LLM
 
 **Invariants:**
-- `response_text` must be non-empty
-- `cost_usd` must match actual API usage
-- `tokens_used` must be > 0
-- System prompt must include all `must_include` items as instructions
-- System prompt must include all `must_avoid` items as negative constraints
+- Every response passes through the 9-layer validation pipeline
+- If validation fails twice, the response is escalated (never loops forever)
+- Non-English responses are translated before delivery
+- Responses are persisted to all memory tiers (Redis, Postgres, Qdrant)
+- Self-model is updated in background (never blocks the hot path)
 
 ---
 
-## 5. Validator (`agents/core/validator.py`)
+## 4. Validator (`brain/validator.py` → `ResponseValidator.validate()`)
 
-**Responsibility:** Ensure response quality across 9 dimensions before delivery.
+**Responsibility:** Run the 9-layer validation pipeline and produce a composite `ValidationResult`.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| **Input** | draft text + `ReasoningPackage` + `Perception` + optional `WorkingMemory` | Draft and all context |
-| **Output** | `ValidationResult` | Pass/fail per layer, revision suggestions, escalation flags |
-| **Latency budget** | < 100ms | Pattern matching + heuristics, no LLM |
-| **Failure mode** | Returns `passed=False` with `escalation_required=True` | Pipeline escalates to human |
+| **Input** | `ResponseCandidate` + `ConversationContext` | Draft response and full context |
+| **Output** | `ValidationResult` | passed (bool), final_score, layers[], issues[], processing_time_ms |
+| **Latency budget** | < 100ms | Pattern matching + heuristics; factual_consistency uses LLM (~50ms) |
+| **Failure mode** | Returns `passed=False` with issues list | Brain regenerates with feedback |
 
-**Layer order and blocking:**
-| # | Layer | Blocking | Failure action |
-|---|-------|----------|----------------|
-| 1 | Safety | ✅ | Immediate escalation, no retry |
-| 2 | Accuracy | ✅ | Revise with missing info |
-| 3 | Completeness | ✅ | Revise with missing elements |
-| 4 | Emotional Alignment | ✅ | Revise with tone correction |
-| 5 | Clarity | ❌ | Log, continue |
-| 6 | Brand | ❌ | Log, continue |
-| 7 | Legal | ✅ if legal-flagged | Escalate to human |
-| 8 | Escalation | ✅ | Route to human queue |
-| 9 | Cost | ❌ | Trim if possible |
+**Layer order, weights, and blocking:**
+
+| # | Layer | Weight | Blocking | Failure action |
+|---|-------|--------|----------|----------------|
+| 1 | Relevance Gate | 0.15 | ❌ | Log, deduct score |
+| 2 | Safety Filter | 0.20 | ✅ | Immediate fail, no retry |
+| 3 | Tone Checker | 0.10 | ❌ | Revise with tone correction |
+| 4 | Cultural Sensitivity | 0.15 | ✅ | Immediate fail for derogatory language |
+| 5 | Factual Consistency | 0.10 | ❌ | Revise with missing facts |
+| 6 | Completeness Gate | 0.10 | ❌ | Revise with missing elements |
+| 7 | Length & Format | 0.05 | ❌ | Trim or reformat |
+| 8 | Emotional Alignment | 0.10 | ❌ | Revise with empathy |
+| 9 | Escalation Gate | 0.05 | ❌ | Signal for human routing |
+
+**Composite score calculation:**
+```
+total_score = Σ(layer.score × weight)
+critical_failed = safety_filter.failed OR cultural_sensitivity.failed
+passed = NOT critical_failed AND total_score >= confidence_threshold (0.5)
+```
 
 **Invariants:**
-- If Safety fails → `escalation_required=True`, no revision attempt
-- If any blocking layer fails → `passed=False`
-- `revision_count` tracks how many times the draft was revised (max 2 before escalation)
-- `final_draft` is set only when `passed=True`
+- If Safety Filter fails → `passed=False`, no revision attempt
+- If Cultural Sensitivity fails → `passed=False`, no revision attempt
+- `final_score` is a weighted average, not a simple pass/fail count
+- `revision_count` tracks how many times the draft was revised (max 2)
+- Escalation Gate can set `suggestions` even when `passed=True` (signals, doesn't block)
 
 ---
 
-## 6. Transmitter (`agents/core/transmitter.py`)
+## 5. Transmitter (`transmitter/__init__.py` → `Transmitter.deliver()`)
 
-**Responsibility:** Format and deliver the validated response to the customer's channel.
+**Responsibility:** Deliver the validated response through the appropriate channel adapter.
 
 | Field | Type | Description |
 |-------|------|-------------|
-| **Input** | validated text + channel + `Perception` | Final text and delivery context |
-| **Output** | `OutboundMessage` | Formatted text, metadata, delivery status |
+| **Input** | `AgentResponse` + `recipient` | Validated response and recipient identifier |
+| **Output** | `bool` | True on success, False on failure |
 | **Latency budget** | < 500ms (network) | WhatsApp/Telegram API call |
-| **Failure mode** | Retries 3x, then queues for manual delivery | Never silently drops a message |
+| **Failure mode** | Returns False; logs error | Never silently drops a message |
 
 **Channel constraints:**
+
 | Channel | Max length | Formatting | Special |
 |---------|-----------|------------|---------|
-| WhatsApp | 4096 chars | Bold, italic, lists | Template messages for proactive |
-| Telegram | 4096 chars | Full markdown | Inline keyboards for options |
-| Email | No limit | Full HTML | Subject line required |
-| Web | No limit | Markdown | Supports streaming |
+| WhatsApp | 4096 chars | No markdown (plain text, numbered lists) | Typing indicator within 500ms |
+| Telegram | 4096 chars | Full markdown | Parse mode support |
+| Webchat | No limit | Markdown | Responses stored in-memory for API retrieval |
 
 **Invariants:**
-- `outbound.text` must be non-empty
-- Text must not exceed channel max length (trim or split if needed)
-- If `perception.is_escalation_request=True`: must include human handoff indicator
-- Typing indicator must be sent within 500ms of message receipt (WhatsApp requirement)
+- Response text must be non-empty
+- Webchat responses are stored for API retrieval (not sent externally)
+- Messaging channel failures are logged but don't crash the pipeline
+- All adapters implement `send()` and `send_media()` abstract methods
 
 ---
 
@@ -174,8 +196,10 @@ else:
 
 These hold across the entire pipeline:
 
-1. **A message is never silently dropped.** Every customer message gets a response, an escalation, or a queued retry.
-2. **Cost is tracked per-turn.** Every LLM call reports `cost_usd`, and the daily budget is enforced.
-3. **Escalation is one-way.** Once escalated to human, the AI does not resume without human approval.
-4. **Revision limit = 2.** If the Validator fails the same draft twice, escalate rather than loop forever.
-5. **Latency budget = 35s total.** From message receipt to response delivery. If exceeded, send a holding message and continue processing.
+1. **A message is never silently dropped.** Every customer message gets a response, an escalation, or an error message.
+2. **Escalation is one-way.** Once escalated to human, the AI does not resume without human approval.
+3. **Revision limit = 2.** If the Validator fails the same draft twice, escalate rather than loop forever.
+4. **Latency budget = 35s total.** From message receipt to response delivery. If exceeded, send error message.
+5. **Cost is tracked per-turn.** Every LLM call reports latency; Prometheus metrics track token usage.
+6. **Self-model updates are async.** Background tasks only, never block the response path.
+7. **Memory persistence is best-effort.** Failures in Qdrant/Redis don't prevent response delivery.

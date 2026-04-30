@@ -1,259 +1,337 @@
-# knowledge/hosting_playbooks.yaml
-# ───────────────────────────────────────────────
-# Domain-specific troubleshooting playbooks for African web hosting.
-# The Reasoner loads these to build resolution paths.
-# Copy into: knowledge/hosting_playbooks.yaml
+# Hosting Playbooks — Domain-Specific Troubleshooting
+# These playbooks provide diagnostic steps, common causes, and resolution
+# templates for African web hosting support scenarios.
+#
+# Loaded by: knowledge/playbook_loader.py
+# Used by: CoordinatorBrain for dispatch decisions, Reasoner for resolution paths
 
 playbooks:
 
-  # ── Email ──────────────────────────────────────
+  # ── Email Issues ─────────────────────────────────────────────────
 
   email_not_sending:
     product_area: EMAIL
     triggers:
-      - "can't send email"
       - "email not sending"
-      - "outgoing mail failing"
-      - "SMTP error"
-      - "bounceback"
+      - "can't send email"
+      - "email bounceback"
+      - "smtp error"
+      - "outgoing mail"
+      - "barua pepe"
+      - "email haifanyi"
     diagnostic_steps:
-      - step: "Check MX records via dig or DNS lookup"
-        tool: "dig MX {domain}"
-        expected: "Should match provider MX (e.g., mx1.hostprovider.co.ke)"
+      - step: "Check MX records for the domain"
+        tool: check_domain_dns
+        path: "DNS → MX Records"
+        expected: "MX records pointing to our mail servers"
       - step: "Check SPF record"
-        tool: "dig TXT {domain}"
-        expected: "Should include 'include:_spf.hostprovider.co.ke'"
-      - step: "Check DKIM record"
-        tool: "dig TXT default._domainkey.{domain}"
-        expected: "Should return a valid DKIM public key"
-      - step: "Verify SMTP port access"
-        tool: "telnet smtp.hostprovider.co.ke 587"
-        expected: "Should connect and show STARTTLS"
-      - step: "Check mail queue in cPanel"
-        path: "cPanel → Email → Track Delivery"
-        expected: "No deferred messages older than 1 hour"
+        tool: check_domain_dns
+        path: "DNS → TXT Records"
+        expected: "v=spf1 include:_spf.ourprovider.com ~all"
+      - step: "Check if domain is suspended"
+        tool: check_invoice
+        path: "WHMCS → Domain Status"
+        expected: "Active"
+      - step: "Check email quota"
+        tool: lookup_customer
+        path: "cPanel → Email Accounts → Usage"
+        expected: "Under 80% of quota"
     common_causes:
-      - cause: "MX records pointing to old provider after migration"
-        fix: "Update nameservers or MX records to hostprovider values"
-        propagation_time: "Up to 48 hours"
-      - cause: "Missing SPF record"
-        fix: "Add TXT record: v=spf1 include:_spf.hostprovider.co.ke ~all"
-        propagation_time: "30 minutes"
-      - cause: "SMTP port blocked by ISP (common in Kenya/Tanzania)"
-        fix: "Try port 465 (SSL) or 587 (TLS). Some ISPs block 25."
-        note: "Safaricom and Airtel occasionally block port 25"
-      - cause: "Mail quota exceeded"
-        fix: "Check cPanel → Email Accounts → disk usage. Upgrade or clean up."
+      - cause: "MX records pointing to old provider"
+        fix: "Update MX records to our mail server hostnames"
+        propagation_time: "30-60 minutes"
+      - cause: "Missing or incorrect SPF record"
+        fix: "Add TXT record: v=spf1 include:_spf.ourprovider.com ~all"
+        propagation_time: "30-60 minutes"
+      - cause: "Email quota exceeded"
+        fix: "Delete old emails or upgrade hosting plan"
+      - cause: "Domain suspended due to unpaid invoice"
+        fix: "Process payment via M-Pesa, then unsuspend"
+      - cause: "SMTP port blocked by ISP"
+        fix: "Try port 587 (TLS) or 465 (SSL) instead of 25"
     escalation_criteria:
-      - "Mail server IP is blacklisted (check MXToolbox)"
-      - "Customer's domain has expired"
-      - "Issue persists after 48h with correct DNS"
+      - "MX records correct but email still failing after 2 hours"
+      - "Customer reports blacklisting (bounce code 550)"
+      - "Multiple customers on same server reporting issues"
+    empathy_statements:
+      - "I understand how important email is for your business."
+      - "Let me help you get your email working again."
+      - "I know this is frustrating — email issues can affect your daily operations."
+    resolution:
+      - "Check and update MX records"
+      - "Verify SPF and DKIM records"
+      - "Wait for DNS propagation (30-60 minutes)"
+      - "Test by sending a test email"
 
   email_not_receiving:
     product_area: EMAIL
     triggers:
-      - "not getting emails"
+      - "not receiving email"
       - "inbox empty"
-      - "emails bouncing to sender"
-      - "can't receive email"
+      - "email not arriving"
+      - "missing emails"
+      - "incoming mail"
     diagnostic_steps:
       - step: "Check MX records"
-        tool: "dig MX {domain}"
-        expected: "Must point to hostprovider mail servers"
+        tool: check_domain_dns
+        expected: "MX records pointing to our servers"
       - step: "Check email routing in cPanel"
-        path: "cPanel → Email → Email Routing"
-        expected: "Should be 'Local Mail Exchanger'"
+        path: "cPanel → Email Routing"
+        expected: "Local Mail Exchanger"
       - step: "Check spam folder"
-        path: "cPanel → Email → Spam Filters"
-        expected: "No overly aggressive rules"
-      - step: "Check email forwarders"
-        path: "cPanel → Email → Forwarders"
-        expected: "No conflicting forwarders"
+        path: "cPanel → Spam Filters"
+        expected: "No aggressive filters blocking legitimate mail"
     common_causes:
-      - cause: "MX records not propagated yet"
-        fix: "Wait up to 48h. Use intodns.com to verify."
+      - cause: "MX records pointing to wrong server"
+        fix: "Update MX records to our mail hostnames"
       - cause: "Email routing set to Remote"
         fix: "Change to Local Mail Exchanger in cPanel"
-      - cause: "Disk quota full"
-        fix: "Delete old emails or upgrade plan"
+      - cause: "Aggressive spam filters"
+        fix: "Whitelist sender or adjust spam score threshold"
+      - cause: "Email forwarder misconfigured"
+        fix: "Check forwarders in cPanel → Email Forwarders"
+    empathy_statements:
+      - "Missing important emails can be stressful. Let me help you sort this out."
+    resolution:
+      - "Verify MX records point to correct server"
+      - "Check email routing is set to Local"
+      - "Review spam filter settings"
+      - "Test by sending from external account"
 
-  # ── SSL ────────────────────────────────────────
-
-  ssl_not_working:
-    product_area: SSL
-    triggers:
-      - "SSL error"
-      - "HTTPS not working"
-      - "certificate error"
-      - "site not secure"
-      - "NET::ERR_CERT"
-    diagnostic_steps:
-      - step: "Check certificate status"
-        tool: "echo | openssl s_client -servername {domain} -connect {domain}:443 2>/dev/null | openssl x509 -noout -dates"
-        expected: "notAfter should be in the future"
-      - step: "Check certificate matches domain"
-        tool: "echo | openssl s_client -servername {domain} -connect {domain}:443 2>/dev/null | openssl x509 -noout -text | grep -A1 'Subject Alternative Name'"
-        expected: "Should include {domain} and www.{domain}"
-      - step: "Check mixed content"
-        path: "Browser console → Security tab"
-        expected: "No mixed content warnings"
-    common_causes:
-      - cause: "Certificate expired"
-        fix: "Renew via cPanel → SSL/TLS → AutoSSL or Let's Encrypt"
-      - cause: "Certificate doesn't cover www subdomain"
-        fix: "Reissue with both domain.co.ke and www.domain.co.ke"
-      - cause: "DNS not pointing to correct server"
-        fix: "Verify A record points to hosting server IP"
-      - cause: "Mixed content (HTTP resources on HTTPS page)"
-        fix: "Update all internal links to use https:// or //"
-    escalation_criteria:
-      - "EV certificate required (e-commerce)"
-      - "Wildcard certificate needed"
-
-  # ── DNS ────────────────────────────────────────
+  # ── DNS & Domain ─────────────────────────────────────────────────
 
   dns_not_resolving:
     product_area: DNS
     triggers:
+      - "dns not resolving"
       - "domain not loading"
-      - "DNS error"
       - "site not found"
-      - "nameserver"
-      - "NXDOMAIN"
+      - "dns propagation"
+      - "nameservers"
+      - "domain haifanyi"
     diagnostic_steps:
-      - step: "Check nameservers"
-        tool: "dig NS {domain}"
-        expected: "Should match hostprovider nameservers"
+      - step: "Check nameserver configuration"
+        tool: check_domain_dns
+        path: "DNS → NS Records"
+        expected: "NS records pointing to our nameservers"
       - step: "Check A record"
-        tool: "dig A {domain}"
-        expected: "Should return hosting server IP"
-      - step: "Check propagation globally"
-        tool: "https://www.whatsmydns.net/#{domain}/A"
-        expected: "Consistent across all locations"
+        tool: check_domain_dns
+        path: "DNS → A Records"
+        expected: "A record pointing to server IP"
+      - step: "Check domain registration status"
+        tool: lookup_customer
+        path: "WHMCS → Domain → Status"
+        expected: "Active"
     common_causes:
       - cause: "Nameservers not updated at registrar"
-        fix: "Update NS records at domain registrar to hostprovider values"
+        fix: "Update nameservers at domain registrar to our NS hostnames"
         propagation_time: "24-48 hours"
-      - cause: "Domain expired at registrar"
-        fix: "Renew domain at registrar (not hosting provider)"
-      - cause: "DNS zone missing A record"
-        fix: "Add A record in cPanel → Zone Editor"
-    note: "For .co.ke, .go.ke domains: KENIC propagation can take up to 72h"
+      - cause: "DNS propagation in progress"
+        fix: "Wait 24-48 hours after nameserver change"
+      - cause: "Domain expired"
+        fix: "Renew domain through WHMCS or contact support"
+      - cause: "A record missing or incorrect"
+        fix: "Add A record pointing to server IP in DNS zone editor"
+    escalation_criteria:
+      - "DNS not resolving after 48 hours"
+      - "Domain shows as expired despite recent payment"
+    empathy_statements:
+      - "I understand you're eager to get your site online. Let me check what's happening."
+      - "DNS changes can take time to propagate. Let me verify the configuration."
 
-  # ── Website Down ──────────────────────────────
+  ssl_certificate_errors:
+    product_area: SSL
+    triggers:
+      - "ssl error"
+      - "certificate error"
+      - "https not working"
+      - "not secure"
+      - "ssl certificate"
+      - "site shows not secure"
+    diagnostic_steps:
+      - step: "Check SSL certificate status"
+        tool: check_domain_dns
+        path: "DNS → HTTPS/SSL"
+        expected: "Valid SSL certificate"
+      - step: "Check if domain points to correct server"
+        tool: check_domain_dns
+        expected: "A record correct"
+      - step: "Check certificate expiry"
+        path: "cPanel → SSL/TLS → Manage SSL"
+        expected: "Certificate not expired"
+    common_causes:
+      - cause: "SSL certificate expired"
+        fix: "Renew certificate via cPanel → SSL/TLS → AutoSSL"
+      - cause: "Mixed content (HTTP resources on HTTPS page)"
+        fix: "Update all internal links to use HTTPS"
+      - cause: "Domain not pointing to correct server"
+        fix: "Verify A record points to server with SSL"
+      - cause: "Certificate not installed"
+        fix: "Install certificate via cPanel → SSL/TLS"
+    resolution:
+      - "Check certificate status and expiry"
+      - "Run AutoSSL to renew if expired"
+      - "Verify domain points to correct server"
+      - "Check for mixed content warnings"
 
-  site_down:
-    product_area: CPANEL
+  # ── Website & Hosting ────────────────────────────────────────────
+
+  website_down:
+    product_area: HOSTING
     triggers:
       - "website down"
       - "site not loading"
       - "500 error"
       - "503 error"
-      - "white screen"
       - "internal server error"
+      - "website haifanyi"
+      - "site imeshuka"
     diagnostic_steps:
-      - step: "Check server status"
-        path: "cPanel → Server Information"
-        expected: "Server status: Running"
-      - step: "Check error logs"
-        path: "cPanel → Errors → Error Log"
-        expected: "Look for recent PHP/Apache errors"
-      - step: "Check resource usage"
+      - step: "Check if domain resolves"
+        tool: check_domain_dns
+        expected: "A record present and pointing to server"
+      - step: "Check server resource usage"
         path: "cPanel → Resource Usage"
-        expected: "CPU and memory within limits"
-      - step: "Check .htaccess for syntax errors"
-        tool: "Rename .htaccess to .htaccess.bak and test"
-        expected: "If site loads, .htaccess has errors"
+        expected: "CPU/Memory under limits"
+      - step: "Check error logs"
+        path: "cPanel → Error Log"
+        expected: "No critical errors"
+      - step: "Check .htaccess"
+        path: "File Manager → public_html → .htaccess"
+        expected: "No syntax errors"
     common_causes:
+      - cause: ".htaccess syntax error"
+        fix: "Rename .htaccess to .htaccess.bak, test site, fix syntax"
       - cause: "PHP memory limit exceeded"
-        fix: "Add to .htaccess: php_value memory_limit 256M"
-      - cause: "Corrupt .htaccess"
-        fix: "Rename and regenerate via WordPress Settings → Permalinks → Save"
-      - cause: "Plugin/theme conflict (WordPress)"
-        fix: "Rename wp-content/plugins folder to disable all plugins"
+        fix: "Increase memory_limit in php.ini or .htaccess"
       - cause: "Disk space full"
-        fix: "Check cPanel → Disk Usage. Clear logs or upgrade."
-      - cause: "ModSecurity blocking legitimate requests"
-        fix: "Disable specific rule in cPanel → ModSecurity"
+        fix: "Clear old files, logs, or upgrade hosting plan"
+      - cause: "WordPress plugin conflict"
+        fix: "Disable recently installed plugins via File Manager"
+      - cause: "Database connection error"
+        fix: "Check wp-config.php database credentials"
     escalation_criteria:
-      - "Server-level issue (multiple customers affected)"
+      - "Server-wide outage affecting multiple customers"
       - "Database corruption suspected"
-      - "DDoS attack indicators"
-
-  # ── Billing ───────────────────────────────────
-
-  billing_double_charge:
-    product_area: WHMCS
-    triggers:
-      - "charged twice"
-      - "double payment"
-      - "duplicate charge"
-      - "paid twice"
-    diagnostic_steps:
-      - step: "Check WHMCS invoice history"
-        path: "WHMCS Admin → Billing → Invoices → Search by customer"
-        expected: "Look for duplicate invoices for same service/period"
-      - step: "Check payment gateway logs"
-        path: "WHMCS → Billing → Transactions List"
-        expected: "Verify if payment was captured twice"
-      - step: "Check M-Pesa callback logs (if M-Pesa payment)"
-        path: "WHMCS → Modules → M-Pesa → Transaction Log"
-        expected: "M-Pesa sometimes sends duplicate callbacks"
-    resolution:
-      - "Initiate refund for duplicate charge via payment gateway"
-      - "Send confirmation email with refund reference"
-      - "If M-Pesa: refund via M-Pesa portal, takes 24-48h"
+      - "Customer reports data loss"
     empathy_statements:
-      - "I completely understand your frustration — being charged twice is unacceptable, and I'm going to fix this right now."
-      - "I can see the duplicate charge in our system. I'm processing your refund immediately."
-    escalation_criteria:
-      - "Refund not processed within 48 hours"
-      - "Customer threatens legal action"
-      - "Third duplicate charge for same customer"
-
-  # ── cPanel ─────────────────────────────────────
-
-  cpanel_login_failed:
-    product_area: CPANEL
-    triggers:
-      - "can't login to cPanel"
-      - "cPanel password not working"
-      - "cPanel locked out"
-      - "cPanel access denied"
-    diagnostic_steps:
-      - step: "Verify cPanel URL"
-        expected: "https://domain.co.ke:2083 or https://server-ip:2083"
-      - step: "Check if IP is blocked"
-        path: "WHMCS → Support → Open Ticket → Ask for customer IP"
-        expected: "Check cPanel → Security → IP Blocker"
-      - step: "Check failed login attempts"
-        path: "WHMCS → cPanel → Failed Login Attempts"
-        expected: "If >5 failures in 1 hour, IP auto-blocked"
-    resolution:
-      - "Reset password via WHMCS → Products → Change Password"
-      - "If IP blocked: unblock via cPanel → IP Blocker"
-      - "Advise customer to use password manager"
-
-  # ── WordPress ─────────────────────────────────
+      - "I understand your website being down is urgent. Let me investigate right away."
+      - "Let me check what's causing the issue and get your site back online."
 
   wordpress_white_screen:
-    product_area: WORDPRESS
+    product_area: HOSTING
     triggers:
       - "white screen"
-      - "WordPress blank page"
-      - "wp-admin white screen"
-      - "WordPress not loading"
+      - "blank page"
+      - "wordpress error"
+      - "wp-admin not working"
+      - "site blank"
     diagnostic_steps:
-      - step: "Enable debug mode"
-        tool: "Add to wp-config.php: define('WP_DEBUG', true); define('WP_DEBUG_LOG', true);"
-        expected: "Check wp-content/debug.log for errors"
-      - step: "Check PHP version compatibility"
-        path: "cPanel → Select PHP Version"
-        expected: "WordPress 6.x needs PHP 7.4+"
-      - step: "Disable all plugins"
-        tool: "Rename wp-content/plugins to plugins.disabled"
-        expected: "If site loads, plugin conflict"
+      - step: "Enable WordPress debug mode"
+        path: "File Manager → wp-config.php → WP_DEBUG = true"
+        expected: "Error messages displayed"
+      - step: "Check PHP error log"
+        path: "cPanel → Error Log"
+        expected: "PHP fatal error or memory error"
+      - step: "Check recent plugin/theme changes"
+        path: "cPanel → File Manager → wp-content"
+        expected: "Identify recently modified files"
+    common_causes:
+      - cause: "Plugin conflict"
+        fix: "Rename wp-content/plugins folder to disable all plugins"
+      - cause: "PHP memory limit"
+        fix: "Add define('WP_MEMORY_LIMIT', '256M'); to wp-config.php"
+      - cause: "Theme error"
+        fix: "Switch to default theme via database (wp_options → template)"
+      - cause: "Corrupted core files"
+        fix: "Re-upload WordPress core files via File Manager"
     resolution:
-      - "Most common: plugin conflict. Re-enable one by one to find culprit."
-      - "Second most common: memory limit. Add php_value memory_limit 256M to .htaccess"
-      - "Third: corrupt WordPress core. Reinstall via cPanel → Softaculous"
+      - "Enable debug mode to see actual error"
+      - "Disable plugins one by one to find culprit"
+      - "Increase PHP memory limit"
+      - "Re-upload core files if corrupted"
+
+  # ── Billing & Payments ───────────────────────────────────────────
+
+  payment_not_reflecting:
+    product_area: BILLING
+    triggers:
+      - "payment not showing"
+      - "paid but invoice still unpaid"
+      - "mpesa payment not reflecting"
+      - "malipo hayajaonekana"
+      - "nilipia lakini"
+    diagnostic_steps:
+      - step: "Check invoice status"
+        tool: check_invoice_status
+        expected: "Paid"
+      - step: "Query M-Pesa transaction status"
+        tool: mpesa_query_status
+        expected: "ResultCode 0 (Success)"
+      - step: "Check payment gateway logs"
+        path: "WHMCS → Billing → Gateway Log"
+        expected: "Successful callback received"
+    common_causes:
+      - cause: "M-Pesa callback not received"
+        fix: "Manually verify payment in M-Pesa portal, then mark invoice paid"
+      - cause: "Wrong account reference"
+        fix: "Check M-Pesa receipt number against WHMCS transactions"
+      - cause: "Payment allocated to wrong invoice"
+        fix: "Check all invoices for the customer, re-allocate if needed"
+    escalation_criteria:
+      - "M-Pesa shows successful but WHMCS has no record"
+      - "Customer has M-Pesa receipt but payment not found"
+    empathy_statements:
+      - "I understand you've already paid. Let me trace the payment for you."
+      - "Don't worry — if the payment went through, we'll find it."
+
+  account_suspension:
+    product_area: BILLING
+    triggers:
+      - "account suspended"
+      - "site suspended"
+      - "hosting suspended"
+      - "account imezuiwa"
+    diagnostic_steps:
+      - step: "Check for overdue invoices"
+        tool: check_invoice
+        path: "WHMCS → Invoices → Unpaid"
+        expected: "No overdue invoices"
+      - step: "Check suspension reason"
+        tool: lookup_customer
+        path: "WHMCS → Client → Products → Status"
+        expected: "Active"
+    common_causes:
+      - cause: "Overdue invoice"
+        fix: "Process payment via M-Pesa, then unsuspend hosting"
+      - cause: "TOS violation (spam, resource abuse)"
+        fix: "Review suspension notice, contact abuse team"
+      - cause: "Auto-suspension after grace period"
+        fix: "Payment + manual unsuspend via WHMCS"
+    resolution:
+      - "Identify suspension reason"
+      - "Process payment if billing-related"
+      - "Unsuspend via WHMCS"
+      - "Confirm site is back online"
+    empathy_statements:
+      - "I understand having your site suspended is stressful. Let me help you get it back online."
+      - "Let me check what caused the suspension and resolve it for you."
+
+  # ── General / Multi-Issue ────────────────────────────────────────
+
+  unclear_request:
+    product_area: GENERAL
+    triggers:
+      - "help"
+      - "help me"
+      - "issue"
+      - "problem"
+      - "nataka msaada"
+    diagnostic_steps: []
+    common_causes: []
+    resolution:
+      - "Ask clarifying question to identify the specific issue"
+      - "Offer common options: email, website, billing, domain"
+    empathy_statements:
+      - "I'd be happy to help! Could you tell me more about what you're experiencing?"
+      - "Of course! To help you best, could you describe the issue in more detail?"

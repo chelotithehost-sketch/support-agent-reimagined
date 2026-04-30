@@ -1,208 +1,342 @@
-# docs/REQUEST_LIFECYCLE_EXAMPLE.md
-# ───────────────────────────────────────────────
-# A complete request lifecycle walkthrough for the README.
-# Copy the content below into README.md (replace or append to existing).
-# ───────────────────────────────────────────────
+# Request Lifecycle: Full Walkthrough
 
-## Request Lifecycle: Full Walkthrough
+Here's exactly what happens when a customer sends **"My email isn't sending from example.co.ke"** on WhatsApp.
 
-Here's exactly what happens when a customer sends **"My email isn't sending from example.co.ke"** on WhatsApp:
+This is the actual code path — every function and class exists in the codebase.
 
 ```
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  1. WhatsApp Webhook                                                     │
-│  ─────────────────                                                       │
-│  Incoming: "My email isn't sending from example.co.ke"                   │
-│  From: +254712345678                                                     │
-│  Channel: WhatsApp                                                       │
-│                                                                          │
-│  Adapter: WhatsAppAdapter.verify_signature() → HMAC-SHA256 ✓            │
-│  Adapter: WhatsAppAdapter.parse_webhook() → WhatsAppMessage             │
-│  Adapter: WhatsAppAdapter.send_typing_indicator() → ✓ (< 500ms)        │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  1. WhatsApp Webhook (adapters/__init__.py → whatsapp_webhook())        │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  Incoming: "My email isn't sending from example.co.ke"                  │
+│  From: whatsapp:+254712345678                                           │
+│  Channel: WhatsApp                                                      │
+│                                                                         │
+│  Form data parsed from Twilio webhook:                                  │
+│    From = "whatsapp:+254712345678"                                      │
+│    Body = "My email isn't sending from example.co.ke"                   │
+│    NumMedia = "0"                                                       │
+│                                                                         │
+│  Creates: InboundMessage(                                               │
+│    channel=Channel.WHATSAPP,                                            │
+│    sender_id="+254712345678",                                           │
+│    content="My email isn't sending from example.co.ke",                 │
+│  )                                                                      │
+│                                                                         │
+│  Calls: agent.handle_message(inbound)                                   │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  2. Perceiver                                                            │
-│  ──────────                                                              │
-│  Input: "My email isn't sending from example.co.ke"                     │
-│                                                                          │
-│  Fast-path regex classification (no LLM):                               │
-│    ✓ "email" → Intent.EMAIL_SETUP, ProductArea.EMAIL                    │
-│    ✓ "example.co.ke" → domain_names: ["example.co.ke"]                  │
-│    ✓ "isn't sending" → issue_category: "email_not_sending"              │
-│    ✓ EmotionalState.CALM (no frustration markers)                       │
-│    ✓ Urgency.MEDIUM (no urgency markers)                                │
-│    ✓ confidence: 0.85                                                   │
-│                                                                          │
-│  Output: Perception(intent=EMAIL_SETUP, confidence=0.85, ...)           │
-│  Latency: ~2ms                                                          │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  2. Perceiver (perceiver/__init__.py → Perceiver.process())             │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  Input: InboundMessage                                                  │
+│                                                                         │
+│  Step 1 — Dedup check (Redis lock, TTL 10s):                           │
+│    lock_key = "dedup:whatsapp:+254712345678:<hash>"                     │
+│    Redis SET NX → acquired ✓                                            │
+│                                                                         │
+│  Step 2 — Language detection (perceiver/language.py):                   │
+│    Sheng markers: 0 matches                                             │
+│    Swahili markers: 0 matches                                           │
+│    langdetect → "en"                                                    │
+│    Result: detected_language = "en"                                     │
+│                                                                         │
+│  Step 3 — Intent classification (keyword matching):                     │
+│    "email" → TECHNICAL +1                                               │
+│    "sending" → (no match)                                               │
+│    "example.co.ke" → (no match)                                         │
+│    Result: detected_intent = Intent.TECHNICAL                           │
+│                                                                         │
+│  Step 4 — Sentiment detection:                                          │
+│    Negative markers: 0                                                  │
+│    Positive markers: 0                                                  │
+│    Frustrated markers: 0                                                │
+│    Result: detected_sentiment = Sentiment.NEUTRAL                       │
+│                                                                         │
+│  Step 5 — Urgency detection:                                            │
+│    "urgent"/"emergency"/"asap": not found                               │
+│    sentiment = NEUTRAL → no urgency boost                               │
+│    Result: detected_urgency = Urgency.LOW                               │
+│                                                                         │
+│  Step 6 — Load customer profile:                                        │
+│    Redis cache check → miss                                            │
+│    Create: CustomerProfile(id="+254712345678", phone="+254712345678")   │
+│    Cache in Redis (TTL 1h)                                              │
+│                                                                         │
+│  Step 7 — Load conversation history:                                    │
+│    Postgres query → 0 previous messages (new conversation)              │
+│                                                                         │
+│  Step 8 — Vector search (Qdrant):                                       │
+│    Embed message via LLM → [0.12, -0.34, ...] (1536 dims)              │
+│    Qdrant search → 2 similar patterns found:                            │
+│      1. "MX record pointing to old provider" (score: 0.87)              │
+│      2. "Email bounceback after NS change" (score: 0.81)                │
+│                                                                         │
+│  Step 9 — Persist message to Postgres                                   │
+│  Step 10 — Update session in Redis                                      │
+│                                                                         │
+│  Output: ConversationContext(                                           │
+│    conversation_id="whatsapp:+254712345678",                            │
+│    customer=CustomerProfile(...),                                       │
+│    current_message=Message(content="My email isn't sending..."),        │
+│    message_history=[],                                                  │
+│    detected_intent=TECHNICAL,                                           │
+│    detected_sentiment=NEUTRAL,                                          │
+│    detected_urgency=LOW,                                                │
+│    detected_language="en",                                              │
+│    similar_patterns=[...],                                              │
+│  )                                                                      │
+│  Latency: ~25ms (classification) + ~200ms (vector search + embed)      │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  3. Router                                                               │
-│  ────────                                                                │
-│  Input: RoutingTask(required_capabilities=["email"], urgency=MEDIUM)     │
-│                                                                          │
-│  Scoring all eligible models:                                            │
-│    ollama/qwen2.5:7b  → 0.72 (free, local, good enough for email)       │
-│    openai/gpt-4o-mini → 0.68 (cheap, fast, but costs $)                 │
-│    openai/gpt-4o      → 0.55 (overkill for this task)                   │
-│                                                                          │
-│  Circuit breaker status: all healthy ✓                                  │
-│  Daily budget remaining: $12.40 / $15.00 ✓                              │
-│                                                                          │
-│  Output: ModelSelection(provider="ollama", model="qwen2.5:7b")          │
-│  Latency: ~3ms                                                          │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  3. Coordinator (coordinator/__init__.py → CoordinatorBrain.dispatch()) │
+│  ─────────────────────────────────────────────────────────────────────  │
+│  Input: ConversationContext                                             │
+│                                                                         │
+│  If coordinator LLM available (llama-cpp-python):                       │
+│    System prompt includes tool registry + self-model state              │
+│    User message: "Customer message: My email isn't sending..."          │
+│    LLM generates JSON:                                                  │
+│    {                                                                    │
+│      "intent": "outage",                                                │
+│      "urgency": 3,                                                      │
+│      "language": "en",                                                  │
+│      "steps": [                                                         │
+│        {"tool": "check_domain_dns", "params": {"domain": "example.co.ke"}}, │
+│        {"tool": "lookup_customer", "params": {}},                       │
+│        {"llm_provider": "openai", "params": {"task": "email_troubleshooting"}} │
+│      ],                                                                 │
+│      "confidence": 0.88,                                                │
+│      "reasoning": "Email issue on specific domain — check DNS first"    │
+│    }                                                                    │
+│                                                                         │
+│  If coordinator LLM unavailable (fallback):                             │
+│    Keyword match: "email" → outage intent                               │
+│    Provider priority: ["ollama", "openai", "anthropic"]                 │
+│    Result: DispatchPlan with single LLM step                            │
+│                                                                         │
+│  Output: DispatchPlan(                                                  │
+│    intent="outage",                                                     │
+│    urgency=3,                                                           │
+│    language="en",                                                       │
+│    steps=[                                                              │
+│      DispatchStep(tool="check_domain_dns", params={domain: "example.co.ke"}), │
+│      DispatchStep(tool="lookup_customer", params={}),                   │
+│      DispatchStep(llm_provider="openai", params={task: "email_troubleshoot"}), │
+│    ],                                                                   │
+│    confidence=0.88,                                                     │
+│  )                                                                      │
+│  Latency: <100ms (local LLM) or <10ms (keyword fallback)               │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  4. Reasoner                                                             │
-│  ──────────                                                              │
-│  Assembles ReasoningPackage from 4 sources:                             │
-│                                                                          │
-│  Working Memory:                                                         │
-│    • 1 prior turn (customer's message)                                   │
-│    • clarifications_asked: 0                                            │
-│                                                                          │
-│  Episodic Memory (Postgres):                                            │
-│    • Customer: Standard tier, 120 days, CSAT [4,5,4]                    │
-│    • No prior email issues                                               │
-│                                                                          │
-│  Semantic Memory (Qdrant):                                               │
-│    • Similar case: "MX record pointing to old provider" (CSAT 5)        │
-│    • Pattern: ".co.ke domains — nameserver propagation delays up to 48h"│
-│                                                                          │
-│  Knowledge Base:                                                         │
-│    • Playbook: email_not_sending (from hosting_playbooks.yaml)           │
-│    • KB chunk: "MX records direct email to correct mail server..."       │
-│                                                                          │
-│  Decision: confidence=0.85 → no clarification needed                    │
-│                                                                          │
-│  Output: ReasoningPackage(                                              │
-│    resolution_path=[Check MX → Update NS → Wait propagation → Test],    │
-│    tone_instruction="Professional, efficient, friendly",                 │
-│    must_include=["MX record check step", "propagation time"],            │
-│    must_avoid=["I cannot help you"],                                     │
-│    escalation_recommended=False,                                         │
-│  )                                                                       │
-│  Latency: ~5ms                                                          │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  4. Brain Execution Loop (brain/__init__.py → Brain.generate_response())│
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Step 4a — Execute "check_domain_dns" tool:                             │
+│    → tools/dns_check.py → DNSChecker.check_domain("example.co.ke")      │
+│    → Resolves A, AAAA, MX, NS, CNAME, TXT records                      │
+│    → Result: {                                                          │
+│        A: ["192.168.1.100"],                                            │
+│        MX: ["mx1.old-provider.com"],  ← problem found!                 │
+│        NS: ["ns1.afrihost.co.ke"],                                      │
+│        issues: ["MX records pointing to old provider"],                 │
+│      }                                                                  │
+│    → StepResult(confidence=0.8, success=True, latency=150ms)            │
+│                                                                         │
+│  Step 4b — Execute "lookup_customer" tool:                              │
+│    → tools/whmcs.py → WHMCSClient.get_customer_context(client_id)       │
+│    → Result: {services: [...], open_tickets: [...], unpaid_invoices: []}│
+│    → StepResult(confidence=0.8, success=True, latency=200ms)            │
+│                                                                         │
+│  Step 4c — Execute LLM step (email troubleshooting):                    │
+│    → brain/llm.py → OpenAIProvider.generate(messages)                   │
+│    → System prompt: "You are a professional support agent..."           │
+│    → Intent context: TECHNICAL                                          │
+│    → Task: "explain_dns_results_and_remediate"                          │
+│    → Includes DNS results + customer context + similar patterns         │
+│    → LLM generates: "I can see your MX records are pointing to..."     │
+│    → StepResult(confidence=0.85, success=True, latency=1200ms)          │
+│                                                                         │
+│  No replanning needed (all steps > 0.6 confidence)                      │
+│                                                                         │
+│  Candidate: ResponseCandidate(                                          │
+│    content="I can see your MX records for example.co.ke are still...",  │
+│    confidence=0.85,                                                     │
+│    model_used="gpt-4o",                                                 │
+│  )                                                                      │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  5. Drafter                                                              │
-│  ────────                                                                │
-│  System prompt assembled from ReasoningPackage:                         │
-│    Role: "Professional, empathetic customer support agent..."            │
-│    Customer: "Standard customer, 120 days, no prior email issues"       │
-│    KB: "MX records direct email to correct mail server..."              │
-│    Past case: "MX record pointing to old provider" (CSAT 5)             │
-│    Tone: "Professional, efficient, friendly"                             │
-│    Format: max 300 words, use numbered steps                             │
-│    Required: MX record check, propagation time                          │
-│    Forbidden: "I cannot help you"                                        │
-│                                                                          │
-│  LLM call: ollama/qwen2.5:7b                                            │
-│  Tokens: 300 in / 80 out                                                │
-│  Cost: $0.00 (local model)                                              │
-│                                                                          │
-│  Output: DraftResult(                                                   │
-│    response_text="I see you're having trouble sending email from        │
-│    example.co.ke. Here's what to check:                                 │
-│    1. Verify your MX records point to our mail servers                   │
-│    2. Check that your SPF record includes our servers                    │
-│    3. Wait up to 30 minutes for DNS propagation                         │
-│    Would you like me to walk you through checking your MX records?",    │
-│    confidence=0.82,                                                      │
-│    cost_usd=0.00,                                                        │
-│    latency_ms=800,                                                       │
-│  )                                                                       │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  5. Validator (brain/validator.py → ResponseValidator.validate())       │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Layer 1 — Relevance Gate (weight: 0.15)                                │
+│    Keywords overlap: "email", "MX", "records" → high relevance          │
+│    Score: 0.92  ✓                                                       │
+│                                                                         │
+│  Layer 2 — Safety Filter (weight: 0.20) [CRITICAL]                      │
+│    No unsafe patterns detected                                          │
+│    No sensitive data leaks                                              │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 3 — Tone Checker (weight: 0.10)                                  │
+│    Customer: NEUTRAL → professional tone appropriate                    │
+│    No aggressive markers                                                │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 4 — Cultural Sensitivity (weight: 0.15) [CRITICAL]               │
+│    No derogatory language                                               │
+│    No "third world" / "primitive" markers                               │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 5 — Factual Consistency (weight: 0.10)                           │
+│    LLM cross-check: response mentions MX records pointing to old        │
+│    provider — matches DNS check results                                 │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 6 — Completeness Gate (weight: 0.10)                             │
+│    TECHNICAL intent → needs troubleshooting steps                       │
+│    Response includes: "update MX records", "wait for propagation"       │
+│    Score: 0.9  ✓                                                        │
+│                                                                         │
+│  Layer 7 — Length & Format (weight: 0.05)                               │
+│    Word count: 89 words → under 200 limit for WhatsApp                  │
+│    No markdown formatting                                               │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 8 — Emotional Alignment (weight: 0.10)                           │
+│    Customer: NEUTRAL → no empathy markers needed                        │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Layer 9 — Escalation Gate (weight: 0.05)                               │
+│    No escalation triggers in customer message                           │
+│    No repeated frustration                                              │
+│    Score: 1.0  ✓                                                        │
+│                                                                         │
+│  Composite: (0.92×0.15)+(1.0×0.20)+(1.0×0.10)+(1.0×0.15)+              │
+│             (1.0×0.10)+(0.9×0.10)+(1.0×0.05)+(1.0×0.10)+(1.0×0.05)    │
+│           = 0.138+0.20+0.10+0.15+0.10+0.09+0.05+0.10+0.05             │
+│           = 0.978                                                       │
+│                                                                         │
+│  Result: ValidationResult(passed=True, final_score=0.978)               │
+│  Latency: ~65ms                                                         │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  6. Validator (9 layers)                                                 │
-│  ──────────────────────                                                  │
-│                                                                          │
-│  Layer 1 — Safety Gate (blocking)                                       │
-│    ✓ No dangerous commands, no credentials shared                       │
-│                                                                          │
-│  Layer 2 — Accuracy Gate (blocking)                                     │
-│    ✓ MX record step present ✓ SPF mention present                      │
-│                                                                          │
-│  Layer 3 — Completeness Gate (blocking)                                 │
-│    ✓ "MX record check step" present ✓ "propagation time" present        │
-│                                                                          │
-│  Layer 4 — Emotional Alignment Gate (blocking)                          │
-│    ✓ Customer is calm → professional tone is appropriate                │
-│                                                                          │
-│  Layer 5 — Clarity Gate (non-blocking)                                  │
-│    ✓ Flesch-Kincaid: grade 8 ✓ No unexplained jargon                   │
-│                                                                          │
-│  Layer 6 — Brand Gate (non-blocking)                                    │
-│    ✓ No competitor mentions ✓ No dismissive language                    │
-│                                                                          │
-│  Layer 7 — Legal Gate (skipped — not legal-flagged)                     │
-│    ○ N/A                                                                │
-│                                                                          │
-│  Layer 8 — Escalation Gate (blocking)                                   │
-│    ✓ Customer did not request human agent                               │
-│                                                                          │
-│  Layer 9 — Cost Gate (non-blocking)                                     │
-│    ✓ Response is 67 words — under 300 word limit                       │
-│                                                                          │
-│  Result: ValidationResult(passed=True, revision_count=0)                │
-│  Latency: ~15ms                                                         │
-└──────────────────────────┬───────────────────────────────────────────────┘
+│  6. Post-Processing (brain/__init__.py)                                  │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Translation: not needed (detected_language == "en")                    │
+│                                                                         │
+│  Build AgentResponse:                                                   │
+│    conversation_id = "whatsapp:+254712345678"                           │
+│    content = "I can see your MX records for example.co.ke are still..." │
+│    channel = Channel.WHATSAPP                                           │
+│    confidence = 0.978                                                   │
+│    validation = ValidationResult(passed=True, ...)                      │
+│    intent_handled = Intent.TECHNICAL                                    │
+│    escalated = False                                                    │
+│                                                                         │
+│  Persist to memory:                                                     │
+│    Postgres → save message record                                       │
+│    Redis → update session (last_response, confidence)                   │
+│    Qdrant → store resolution pattern (if confidence >= 0.7)             │
+│                                                                         │
+│  Update self-model (background task):                                   │
+│    tool_reliability: check_domain_dns → EMA update (success)            │
+│    tool_reliability: lookup_customer → EMA update (success)             │
+│    provider_health: openai → EMA latency update                         │
+└──────────────────────────┬──────────────────────────────────────────────┘
                            │
                            ▼
 ┌──────────────────────────────────────────────────────────────────────────┐
-│  7. Transmitter                                                          │
-│  ────────────                                                            │
-│  Format for WhatsApp:                                                    │
-│    • Text within 4096 char limit ✓ (67 words ≈ 400 chars)              │
-│    • No unsupported markdown                                             │
-│                                                                          │
-│  Delivery:                                                               │
-│    → WhatsAppAdapter.send_text("+254712345678", response)               │
-│    → API response: {"id": "wamid.HBgLMjU0NzEy..."}                     │
-│                                                                          │
-│  Post-delivery:                                                          │
-│    • Log turn to Episodic Memory (Postgres)                             │
-│    • Update Working Memory (Redis, 4h TTL)                              │
-│    • Record cost ($0.00) to daily budget tracker                        │
-│    • Record latency (820ms total) to metrics                            │
-│                                                                          │
-│  Total pipeline latency: ~825ms                                         │
+│  7. Transmitter (transmitter/__init__.py → Transmitter.deliver())       │
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Channel: WhatsApp → WhatsAppAdapter.send()                             │
+│    → Twilio API POST to /Messages.json                                  │
+│    → From: whatsapp:+14155238886                                        │
+│    → To: whatsapp:+254712345678                                         │
+│    → Body: "I can see your MX records for example.co.ke are still..."   │
+│    → Response: {"id": "wamid.HBgLMjU0NzEy..."}                         │
+│                                                                         │
+│  Delivery: ✓                                                            │
+└──────────────────────────┬──────────────────────────────────────────────┘
+                           │
+                           ▼
+┌──────────────────────────────────────────────────────────────────────────┐
+│  8. Learning (learning/__init__.py → LearningEngine.capture_interaction)│
+│  ─────────────────────────────────────────────────────────────────────  │
+│                                                                         │
+│  Check: confidence 0.978 >= min_confidence 0.8 → learn from this ✓      │
+│  Check: escalated = False → learn from this ✓                           │
+│                                                                         │
+│  Store learning example:                                                │
+│    Postgres → learning_examples table                                   │
+│    customer_message = "My email isn't sending from example.co.ke"       │
+│    agent_response = "I can see your MX records..."                      │
+│    intent = "technical"                                                 │
+│    confidence = 0.978                                                   │
+│                                                                         │
+│  Log coordinator decision:                                              │
+│    intent = "outage"                                                    │
+│    outcome_confidence = 0.978                                           │
+│    replan_count = 0                                                     │
+│    escalated = False                                                    │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### What the customer sees (WhatsApp):
 
 ```
-I see you're having trouble sending email from example.co.ke.
-Here's what to check:
+I can see your MX records for example.co.ke are still pointing
+to your old provider's mail servers. Here's what to do:
 
-1. Verify your MX records point to our mail servers
-2. Check that your SPF record includes our servers
-3. Wait up to 30 minutes for DNS propagation
+1. Log in to your DNS control panel
+2. Update your MX records to:
+   - Priority 10: mail.afrihost.co.ke
+   - Priority 20: mail2.afrihost.co.ke
+3. Wait 30-60 minutes for DNS propagation
+4. Test by sending a test email
 
-Would you like me to walk you through checking your MX records?
+Your SPF record also needs updating. Would you like me to
+walk you through that as well?
 ```
 
-### Cost breakdown for this conversation:
+### Latency breakdown:
+
+| Component | Latency |
+|-----------|---------|
+| Webhook parsing | <1ms |
+| Perceiver (classification) | ~25ms |
+| Perceiver (vector search) | ~200ms |
+| Coordinator (dispatch) | ~80ms |
+| Brain (DNS check tool) | ~150ms |
+| Brain (WHMCS lookup) | ~200ms |
+| Brain (LLM generation) | ~1200ms |
+| Validator (9 layers) | ~65ms |
+| Transmitter (WhatsApp API) | ~100ms |
+| Learning (persist) | ~50ms |
+| **Total** | **~2070ms** |
+
+### Cost breakdown:
 
 | Component | Cost |
 |-----------|------|
-| Perceiver | $0.00 (regex) |
-| Router | $0.00 (scoring) |
-| Reasoner | $0.00 (assembly) |
-| Drafter | $0.00 (Ollama local) |
-| Validator | $0.00 (pattern matching) |
-| Transmitter | $0.00 (API call only) |
-| **Total** | **$0.00** |
+| Perceiver | $0.00 (regex + Redis) |
+| Coordinator | $0.00 (local llama-cpp-python) |
+| Brain — DNS check | $0.00 (system resolver) |
+| Brain — WHMCS lookup | $0.00 (API call) |
+| Brain — LLM generation | ~$0.003 (GPT-4o, ~400 tokens) |
+| Validator | $0.00 (pattern matching) + ~$0.001 (factual consistency LLM call) |
+| Transmitter | $0.00 (Twilio API) |
+| **Total** | **~$0.004** |
 
-When the local model can't handle a complex task (e.g., billing dispute with legal language), the Router selects a cloud model and cost is tracked per-turn against `DAILY_BUDGET_USD`.
+When the local model handles simpler tasks (greetings, clarifications), cost drops to $0.00.
