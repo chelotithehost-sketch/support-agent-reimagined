@@ -2,6 +2,9 @@
 
 Each tool entry describes what it does, what it requires,
 what it returns, and how it behaves under failure.
+
+The coordinator reads TOOL_REGISTRY for dispatch decisions.
+Tools self-register here — no manual import list needed.
 """
 
 from __future__ import annotations
@@ -19,6 +22,16 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "tool_class": "whmcs",
         "method": "get_invoices",
     },
+    "check_invoice_status": {
+        "description": "Check the status of a specific invoice by ID. Returns whether it's paid, unpaid, overdue, or cancelled.",
+        "requires": ["invoice_id"],
+        "returns": ["status", "amount", "due_date"],
+        "latency_profile": "fast",
+        "cost": "free",
+        "failure_mode": "returns_empty",
+        "tool_class": "whmcs",
+        "method": "get_invoice",
+    },
     "mpesa_push": {
         "description": "Initiate M-Pesa STK Push payment request to customer's phone. Sends a payment prompt that the customer confirms with their PIN.",
         "requires": ["phone_number", "amount", "invoice_id"],
@@ -28,6 +41,16 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "failure_mode": "returns_error_with_message",
         "tool_class": "mpesa",
         "method": "request_payment",
+    },
+    "mpesa_query_status": {
+        "description": "Query the status of an M-Pesa STK Push transaction using the CheckoutRequestID.",
+        "requires": ["checkout_request_id"],
+        "returns": ["result_code", "result_desc", "amount", "receipt_number"],
+        "latency_profile": "fast",
+        "cost": "free",
+        "failure_mode": "returns_error",
+        "tool_class": "mpesa",
+        "method": "query_stk_status",
     },
     "check_domain_dns": {
         "description": "Check DNS propagation and status for a domain. Verifies A, MX, NS, and CNAME records. Used for hosting troubleshooting.",
@@ -59,26 +82,6 @@ TOOL_REGISTRY: dict[str, dict[str, Any]] = {
         "tool_class": "whmcs",
         "method": "get_customer_context",
     },
-    "check_invoice_status": {
-        "description": "Check the status of a specific invoice by ID. Returns whether it's paid, unpaid, overdue, or cancelled.",
-        "requires": ["invoice_id"],
-        "returns": ["status", "amount", "due_date"],
-        "latency_profile": "fast",
-        "cost": "free",
-        "failure_mode": "returns_empty",
-        "tool_class": "whmcs",
-        "method": "get_invoice",
-    },
-    "mpesa_query_status": {
-        "description": "Query the status of an M-Pesa STK Push transaction using the CheckoutRequestID.",
-        "requires": ["checkout_request_id"],
-        "returns": ["result_code", "result_desc", "amount", "receipt_number"],
-        "latency_profile": "fast",
-        "cost": "free",
-        "failure_mode": "returns_error",
-        "tool_class": "mpesa",
-        "method": "query_stk_status",
-    },
 }
 
 
@@ -98,3 +101,35 @@ def get_tools_by_latency(profile: str) -> list[str]:
         name for name, info in TOOL_REGISTRY.items()
         if info.get("latency_profile") == profile
     ]
+
+
+def get_tools_by_class(tool_class: str) -> list[str]:
+    """Get tool names filtered by tool class (whmcs/mpesa/dns_check)."""
+    return [
+        name for name, info in TOOL_REGISTRY.items()
+        if info.get("tool_class") == tool_class
+    ]
+
+
+def register_tool(
+    name: str,
+    description: str,
+    requires: list[str] | None = None,
+    returns: list[str] | None = None,
+    latency_profile: str = "medium",
+    cost: str = "free",
+    failure_mode: str = "returns_error",
+    tool_class: str = "custom",
+    method: str = "",
+) -> None:
+    """Register a new tool at runtime (used by plugins)."""
+    TOOL_REGISTRY[name] = {
+        "description": description,
+        "requires": requires or [],
+        "returns": returns or [],
+        "latency_profile": latency_profile,
+        "cost": cost,
+        "failure_mode": failure_mode,
+        "tool_class": tool_class,
+        "method": method,
+    }

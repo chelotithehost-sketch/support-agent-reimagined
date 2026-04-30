@@ -8,6 +8,7 @@ from enum import Enum
 from typing import Any
 
 import httpx
+from pydantic import BaseModel
 
 from afriagent.config import settings, LLMProvider
 from afriagent.config.logging import get_logger
@@ -68,9 +69,6 @@ class LLMResponse(BaseModel):
     tokens_output: int = 0
     latency_ms: float = 0.0
     raw: dict[str, Any] = {}
-
-
-from pydantic import BaseModel
 
 
 class BaseLLMProvider(ABC):

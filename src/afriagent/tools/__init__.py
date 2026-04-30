@@ -9,7 +9,14 @@ from __future__ import annotations
 from afriagent.config.logging import get_logger
 from afriagent.tools.whmcs import WHMCSClient
 from afriagent.tools.mpesa import MpesaClient
-from afriagent.tools.registry import TOOL_REGISTRY, get_tool_info, get_all_tools
+from afriagent.tools.registry import (
+    TOOL_REGISTRY,
+    get_tool_info,
+    get_all_tools,
+    get_tools_by_latency,
+    get_tools_by_class,
+    register_tool,
+)
 from afriagent.tools.dns_check import DNSChecker, get_dns_checker
 
 log = get_logger(__name__)
@@ -19,6 +26,9 @@ __all__ = [
     "TOOL_REGISTRY",
     "get_tool_info",
     "get_all_tools",
+    "get_tools_by_latency",
+    "get_tools_by_class",
+    "register_tool",
     "DNSChecker",
     "get_dns_checker",
 ]

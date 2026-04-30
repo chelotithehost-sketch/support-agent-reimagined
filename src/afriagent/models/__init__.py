@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import uuid
-from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -206,6 +205,8 @@ class LearningExample(BaseModel):
 
 
 # ── Coordinator Dispatch ──────────────────────────────────────────
+# NOTE: Single definition (Pydantic BaseModel). Previous versions had
+# duplicate @dataclass definitions that shadowed these — removed.
 
 
 class DispatchStep(BaseModel):
@@ -226,28 +227,3 @@ class DispatchPlan(BaseModel):
     confidence: float = 0.5          # 0.0–1.0
     reasoning: str = ""              # brief internal reasoning
     escalate: bool = False           # whether to escalate to human
-
-
-# ── Coordinator Dispatch ──────────────────────────────────────────
-
-
-@dataclass
-class DispatchStep:
-    """A single step in a dispatch plan — either a tool call or an LLM call."""
-
-    tool: str | None            # tool name or None for LLM call
-    llm_provider: str | None    # provider name or None for tool call
-    params: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class DispatchPlan:
-    """The coordinator's dispatch plan for handling a customer message."""
-
-    intent: str                 # billing | outage | general | hostile | unclear
-    urgency: int                # 1–5
-    language: str               # en | sw | sheng | other
-    steps: list[DispatchStep]   # ordered list of tool calls or LLM calls
-    confidence: float           # 0.0–1.0
-    reasoning: str              # brief internal reasoning
-    escalate: bool = False      # if True, skip to human escalation
